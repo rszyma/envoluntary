@@ -52,6 +52,8 @@ impl ShellPromptState {
     ) -> anyhow::Result<CurrentDirState> {
         let current_dir = if let Some(current_dir) = provided_current_dir {
             current_dir
+        } else if let Some(logical_current_dir) = logical_current_dir() {
+            logical_current_dir
         } else {
             env::current_dir()?
         };
@@ -178,4 +180,23 @@ impl<RC> EnvStateVarState<RC> {
 
 fn get_env_state_var(env_state_var_key: impl AsRef<OsStr>) -> Option<OsString> {
     env::var_os(env_state_var_key)
+}
+
+fn logical_current_dir() -> Option<PathBuf> {
+    let pwd = env::var_os("PWD")?;
+    if pwd.is_empty() {
+        return None;
+    }
+    let pwd_path = PathBuf::from(pwd);
+    if !pwd_path.is_absolute() {
+        return None;
+    }
+    let physical = env::current_dir().ok()?;
+    match (pwd_path.canonicalize(), physical.canonicalize()) {
+        (
+            std::result::Result::Ok(logical_canonical),
+            std::result::Result::Ok(physical_canonical),
+        ) if logical_canonical == physical_canonical => Some(pwd_path),
+        _ => None,
+    }
 }

@@ -104,33 +104,107 @@ impl EnvoluntaryConfig {
             env::current_dir()?.join(path)
         }
         .clean();
-        let absolute_path_string = absolute_path.to_string_lossy();
-        let absolute_path_string_with_tilde = replace_home_with_tilde(&absolute_path_string);
+        let candidates = candidate_paths_for_matching(&absolute_path, path);
         let matched_entries = self
             .entries
             .as_deref()
             .unwrap_or(&[])
             .iter()
             .filter(|entry| {
-                let pattern_match = path_is_match_with_or_without_home_tilde(
-                    &absolute_path_string,
-                    absolute_path_string_with_tilde.as_ref(),
-                    &entry.pattern,
-                );
+                let pattern_match = candidates.iter().any(|candidate| {
+                    let candidate_string = candidate.to_string_lossy();
+                    let candidate_string_with_tilde = replace_home_with_tilde(&candidate_string);
+                    path_is_match_with_or_without_home_tilde(
+                        &candidate_string,
+                        candidate_string_with_tilde.as_ref(),
+                        &entry.pattern,
+                    )
+                });
                 if let Some(pattern_adjacent) = &entry.pattern_adjacent
                     && pattern_match
                 {
-                    return find_adjacent_dir_entry_walking_up_file_hierarchy(
-                        PathBuf::from(path),
-                        pattern_adjacent,
-                    )
-                    .is_some();
+                    return candidates.iter().any(|candidate| {
+                        find_adjacent_dir_entry_walking_up_file_hierarchy(
+                            candidate.clone(),
+                            pattern_adjacent,
+                        )
+                        .is_some()
+                    });
                 }
                 pattern_match
             })
             .cloned()
             .collect();
         Ok(matched_entries)
+    }
+}
+
+fn candidate_paths_for_matching(absolute_path: &Path, original_path: &Path) -> Vec<PathBuf> {
+    let mut candidates = vec![absolute_path.to_path_buf()];
+    if let Ok(canonical) = absolute_path.canonicalize()
+        && !candidates.contains(&canonical)
+    {
+        candidates.push(canonical);
+    }
+    if let Some(logical) = logical_path_candidate(absolute_path, original_path)
+        && !candidates.contains(&logical)
+    {
+        candidates.push(logical.clone());
+        if let Ok(canonical_logical) = logical.canonicalize()
+            && !candidates.contains(&canonical_logical)
+        {
+            candidates.push(canonical_logical);
+        }
+    }
+    candidates
+}
+
+fn logical_path_candidate(absolute_path: &Path, original_path: &Path) -> Option<PathBuf> {
+    let pwd_string = env::var("PWD").ok()?;
+    if pwd_string.is_empty() {
+        return None;
+    }
+    let logical_absolute = if original_path.is_absolute() {
+        PathBuf::from(pwd_string).clean()
+    } else {
+        PathBuf::from(pwd_string).join(original_path).clean()
+    };
+    if logical_absolute == *absolute_path {
+        return None;
+    }
+    let logical_resolved = best_effort_canonical(&logical_absolute)?;
+    let absolute_resolved = best_effort_canonical(absolute_path)?;
+    if logical_resolved == absolute_resolved {
+        Some(logical_absolute)
+    } else {
+        None
+    }
+}
+
+fn best_effort_canonical(path: &Path) -> Option<PathBuf> {
+    if let Ok(canonical) = path.canonicalize() {
+        return Some(canonical);
+    }
+    let mut current = path.to_path_buf();
+    let mut remainder = Vec::new();
+    loop {
+        match current.file_name() {
+            Some(file_name) => {
+                remainder.push(file_name.to_os_string());
+                let Some(parent) = current.parent() else {
+                    return None;
+                };
+                current = parent.to_path_buf();
+                if let Ok(canonical_parent) = current.canonicalize() {
+                    let mut result = canonical_parent;
+                    for component in remainder.iter().rev() {
+                        result.push(component);
+                    }
+                    return Some(result);
+                }
+            }
+            None => return current.canonicalize().ok(),
+        }
     }
 }
 
